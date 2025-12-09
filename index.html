@@ -76,9 +76,9 @@ let player = {
   vy: 0,
   onGround: true
 };
-const GRAVITY = 0.00004 * H; // scaled to canvas size
-const JUMP_V = -0.009 * H;
-const MAX_JUMP_TIME = 10; // ms - holding to raise jump
+const GRAVITY = 0.0042 * H; // scaled to canvas size
+const JUMP_V = -0.55 * H;
+const MAX_JUMP_TIME = 110; // ms - holding to raise jump
 let jumpTime = 0;
 let holdingJump = false;
 
@@ -393,6 +393,7 @@ setTimeout(()=>{ spawnObstacle(); spawnCoin(); }, 500);
 </script>
 </body>
 </html>
+
 
 
 
