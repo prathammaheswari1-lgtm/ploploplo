@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Sky Runner — Mobile-friendly Endless Runner</title>
+<style>
+  /* Simple reset */
+  html,body { height:100%; margin:0; background:#87CEEB; -webkit-tap-highlight-color: transparent; }
+  body { display:flex; align-items:center; justify-content:center; font-family:system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial; }
+  #gameCanvas { background: linear-gradient(#87CEEB 0%, #bde6ff 60%, #dff6ff 100%); border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.15); touch-action: manipulation; }
+  .ui {
+    position: absolute; left:12px; top:12px; color:#03314b; font-weight:700; text-shadow:0 1px 0 rgba(255,255,255,0.6);
+  }
+  .hint { position: absolute; right:12px; top:12px; color:#03314b; font-weight:600; opacity:0.9; }
+  .footer { position: absolute; left:12px; bottom:18px; color:#03314b; font-size:14px; opacity:0.9; }
+  /* Make canvas container responsive on mobile */
+  #container { position:relative; width:100%; max-width:780px; height:100%; max-height:920px; padding:12px; box-sizing:border-box; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="gameCanvas" width="720" height="405"></canvas>
+  <div class="ui" id="score">Score: 0</div>
+  <div class="hint" id="best">Best: 0</div>
+  <div class="footer" id="controls">Tap / Space = Jump • Hold for higher jump</div>
+</div>
+
+<script>
+/*
+  Sky Runner - A simple mobile-friendly endless runner
+  Controls:
+   - Mobile: Tap or touch+hold to jump (longer hold => higher jump)
+   - Desktop: Space / ArrowUp to jump
+  Save as index.html and open in Chrome.
+*/
+
+// ==== Config ====
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+function resizeForScreen() {
+  // Keep canvas aspect ratio 16:9 and scale to container width
+  const container = document.getElementById('container');
+  const maxW = container.clientWidth - 24;
+  const targetH = Math.round(maxW * 9/16);
+  canvas.style.width = Math.max(300, Math.min(maxW, 720)) + 'px';
+  canvas.style.height = (targetH) + 'px';
+  // also adjust drawing buffer for crispness
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * DPR);
+  canvas.height = Math.round(rect.height * DPR);
+  W = canvas.width; H = canvas.height;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+resizeForScreen();
+window.addEventListener('resize', resizeForScreen);
+
+// ==== Game State ====
+let running = true;
+let gameOver = false;
+let score = 0;
+let best = Number(localStorage.getItem('skyRunnerBest') || 0);
+document.getElementById('best').textContent = "Best: " + best;
+document.getElementById('score').textContent = "Score: 0";
+
+// Physics / player
+const groundY = () => (H / DPR) * 0.78;
+let player = {
+  x: 110,
+  y: groundY() - 48,
+  w: 48,
+  h: 48,
+  vy: 0,
+  onGround: true
+};
+const GRAVITY = 0.0026 * H; // scaled to canvas size
+const JUMP_V = -0.82 * H;
+const MAX_JUMP_TIME = 220; // ms - holding to raise jump
+let jumpTime = 0;
+let holdingJump = false;
+
+// Speed & obstacles
+let gameSpeed = 0.36 * W; // px per second baseline (will increase)
+let difficultyTimer = 0;
+let spawnTimer = 0;
+const obstacles = [];
+const coins = [];
+
+// Timers
+let lastTime = performance.now();
+
+// For touch handling (mobile)
+let touchStartTime = 0;
+
+// Sounds - simple beep via WebAudio
+const AudioCtx = typeof AudioContext !== 'undefined' ? new AudioContext() : null;
+function beep(f=440, t=0.05, v=0.12) {
+  if (!AudioCtx) return;
+  const o = AudioCtx.createOscillator();
+  const g = AudioCtx.createGain();
+  o.connect(g); g.connect(AudioCtx.destination);
+  g.gain.value = v;
+  o.frequency.value = f;
+  o.type = 'sine';
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, AudioCtx.currentTime + t);
+  o.stop(AudioCtx.currentTime + t + 0.02);
+}
+
+// ==== Helpers ====
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function rectsCollide(a,b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// ==== Obstacles & coins ====
+function spawnObstacle() {
+  const size = rand(28, 70) * (W / (720)); // scale with width
+  const h = size;
+  const w = size * rand(0.6, 1.1);
+  const obstacle = {
+    x: (W / DPR) + 20,
+    y: groundY() - h,
+    w: w,
+    h: h,
+    type: 'box'
+  };
+  obstacles.push(obstacle);
+}
+
+function spawnCoin() {
+  const c = {
+    x: (W / DPR) + 30,
+    y: groundY() - rand(120, 200),
+    r: 12 * (W / 720),
+    collected: false
+  };
+  coins.push(c);
+}
+
+// ==== Input handling ====
+function startJumpHold() {
+  if (gameOver) { restart(); return; }
+  if (player.onGround) {
+    holdingJump = true;
+    jumpTime = 0;
+    touchStartTime = performance.now();
+    player.vy = JUMP_V;
+    player.onGround = false;
+    beep(880, 0.04, 0.08);
+  } else {
+    // allow small mid-air boost if tapping (optional)
+  }
+}
+function endJumpHold() {
+  holdingJump = false;
+  jumpTime = 0;
+}
+
+// Mouse / touch / keyboard
+canvas.addEventListener('touchstart', (e)=>{ e.preventDefault(); startJumpHold(); }, {passive:false});
+canvas.addEventListener('mousedown', (e)=>{ startJumpHold(); });
+canvas.addEventListener('touchend', (e)=>{ e.preventDefault(); endJumpHold(); }, {passive:false});
+canvas.addEventListener('mouseup', ()=>{ endJumpHold(); });
+
+window.addEventListener('keydown', (e)=> {
+  if (e.code === 'Space' || e.key === ' ' || e.code === 'ArrowUp') {
+    if (e.repeat) return;
+    startJumpHold();
+  }
+});
+window.addEventListener('keyup', (e)=> {
+  if (e.code === 'Space' || e.key === ' ' || e.code === 'ArrowUp') {
+    endJumpHold();
+  }
+});
+
+// ==== Game Loop ====
+function update(dt) {
+  if (!running) return;
+  if (gameOver) return;
+
+  // Increase difficulty slowly
+  difficultyTimer += dt;
+  if (difficultyTimer > 1000) {
+    difficultyTimer = 0;
+    gameSpeed *= 1.007; // slight speed up
+  }
+
+  // Spawn obstacles & coins
+  spawnTimer += dt;
+  const spawnInterval = Math.max(650, 1500 - score * 6); // faster as score increases
+  if (spawnTimer > spawnInterval) {
+    spawnTimer = 0;
+    if (Math.random() < 0.7) spawnObstacle();
+    if (Math.random() < 0.45) spawnCoin();
+  }
+
+  // Update player physics
+  if (holdingJump) {
+    jumpTime += dt;
+    if (jumpTime < MAX_JUMP_TIME) {
+      // sustain upward velocity a bit for higher jump
+      player.vy += -0.0010 * H * (dt / 16);
+    }
+  }
+  player.vy += GRAVITY * (dt / 16);
+  player.y += player.vy * (dt / 16);
+
+  // ground collision
+  const ground = groundY();
+  if (player.y + player.h > ground) {
+    player.y = ground - player.h;
+    player.vy = 0;
+    player.onGround = true;
+  }
+
+  // Move obstacles & coins
+  const movePx = gameSpeed * (dt / 1000);
+  for (let i = obstacles.length-1; i>=0; i--) {
+    obstacles[i].x -= movePx;
+    if (obstacles[i].x + obstacles[i].w < -50) obstacles.splice(i,1);
+  }
+  for (let i = coins.length-1; i>=0; i--) {
+    coins[i].x -= movePx;
+    if (coins[i].x + (coins[i].r*2) < -50) coins.splice(i,1);
+  }
+
+  // Collision detection
+  for (let ob of obstacles) {
+    if (rectsCollide(player, ob)) {
+      // hit!
+      gameOver = true;
+      beep(220, 0.25, 0.18);
+      if (score > best) {
+        best = Math.floor(score);
+        localStorage.setItem('skyRunnerBest', best);
+        document.getElementById('best').textContent = "Best: " + best;
+      }
+    }
+  }
+  for (let i = coins.length-1; i>=0; i--) {
+    const c = coins[i];
+    const coinRect = { x: c.x - c.r/2, y: c.y - c.r/2, w: c.r*1.1, h: c.r*1.1 };
+    if (!c.collected && rectsCollide(player, coinRect)) {
+      c.collected = true;
+      score += 12;
+      beep(1200, 0.06, 0.08);
+      coins.splice(i,1);
+    }
+  }
+
+  // increase score over time
+  score += 0.02 * dt * (gameSpeed / (0.36*W)) ;
+  document.getElementById('score').textContent = "Score: " + Math.floor(score);
+}
+
+function draw() {
+  // Clear
+  ctx.clearRect(0,0,W,DPR?H/DPR:H);
+
+  // Sky gradient (drawn by CSS background, but we can add sun)
+  // Sun
+  const sunX = W/DPR * 0.12, sunY = H/DPR * 0.12;
+  const r = Math.min(W/DPR, H/DPR) * 0.06;
+  const grd = ctx.createRadialGradient(sunX,sunY,r*0.1,sunX,sunY,r);
+  grd.addColorStop(0,'#fff8b3'); grd.addColorStop(1,'#ffd66b');
+  ctx.fillStyle = grd;
+  ctx.beginPath(); ctx.arc(sunX,sunY,r,0,Math.PI*2); ctx.fill();
+
+  // Ground
+  const gy = groundY();
+  ctx.fillStyle = '#4CAF50';
+  ctx.fillRect(0, gy, W/DPR, H/DPR - gy);
+
+  // Draw platforms/tiles on ground for style
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  for (let i = 0; i < W/DPR; i += 46) {
+    ctx.fillRect(i, gy + 6, 28, 8);
+  }
+
+  // Draw coins
+  for (let c of coins) {
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.beginPath();
+    ctx.fillStyle = 'gold';
+    ctx.arc(0,0,c.r,0,Math.PI*2);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Draw obstacles
+  for (let ob of obstacles) {
+    ctx.save();
+    ctx.translate(ob.x, ob.y);
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.fillRect(3, ob.h + 6, ob.w-6, 8);
+    // body
+    ctx.fillStyle = '#8B3A3A';
+    ctx.fillRect(0, 0, ob.w, ob.h);
+    // highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(6, 6, Math.max(4, ob.w*0.25), ob.h - 12);
+    ctx.restore();
+  }
+
+  // Draw player (stylized runner)
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  // shadow under player
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.beginPath();
+  ctx.ellipse(player.w/2 + 6, player.h + 12, player.w/2, 8, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // body
+  ctx.fillStyle = '#ff5a5f';
+  roundRect(ctx, 0, 0, player.w, player.h, 8);
+  ctx.fill();
+
+  // face / eye
+  ctx.fillStyle = 'white';
+  ctx.beginPath(); ctx.arc(player.w*0.65, player.h*0.28, player.w*0.08, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(player.w*0.66, player.h*0.28, player.w*0.03, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+
+  // HUD overlay: score (already in DOM), show game over
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0,0,W/DPR,H/DPR);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold ' + Math.round(28 * (W/720)) + 'px system-ui';
+    ctx.fillText('Game Over', (W/DPR)/2, (H/DPR)/2 - 10);
+    ctx.font = '16px system-ui';
+    ctx.fillText('Score: ' + Math.floor(score) + '  •  Best: ' + best, (W/DPR)/2, (H/DPR)/2 + 22);
+    ctx.fillText('Tap to restart', (W/DPR)/2, (H/DPR)/2 + 56);
+  }
+}
+
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+// ==== Restart ====
+function restart() {
+  obstacles.length = 0; coins.length = 0;
+  score = 0;
+  gameOver = false;
+  gameSpeed = 0.36 * W;
+  player.x = 110;
+  player.y = groundY() - player.h;
+  player.vy = 0;
+  player.onGround = true;
+  document.getElementById('score').textContent = "Score: 0";
+  beep(880, 0.06, 0.06);
+}
+
+// Start on first interaction if audio locked
+document.addEventListener('pointerdown', ()=>{ if (AudioCtx && AudioCtx.state === 'suspended') AudioCtx.resume(); }, { once:true });
+
+// Main loop
+function loop(now) {
+  const dt = Math.min(40, now - lastTime); // cap dt
+  update(dt);
+  draw();
+  lastTime = now;
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame((t)=>{ lastTime = t; loop(t); });
+
+// Restart on tap when game over
+canvas.addEventListener('click', ()=>{ if (gameOver) restart(); });
+
+// Small demo spawns to make game interesting from start
+setTimeout(()=>{ spawnObstacle(); spawnCoin(); }, 500);
+
+</script>
+</body>
+</html>
